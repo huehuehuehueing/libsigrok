@@ -345,7 +345,22 @@ static int dev_open(struct sr_dev_inst *sdi)
 		return SR_ERR;
 	}
 
-	ret = libusb_claim_interface(usb->devhdl, USB_INTERFACE);
+	/*
+	 * Retry claim on transient BUSY: after a close/reopen cycle (e.g.
+	 * pulseview "Stop" then "Run" again) the kernel-side endpoint state
+	 * can take a few ms to settle, during which claim returns BUSY even
+	 * though no other process holds the interface.
+	 */
+	{
+		int attempt;
+		ret = LIBUSB_ERROR_BUSY;
+		for (attempt = 0; attempt < 10; attempt++) {
+			ret = libusb_claim_interface(usb->devhdl, USB_INTERFACE);
+			if (ret != LIBUSB_ERROR_BUSY)
+				break;
+			g_usleep(50 * 1000);
+		}
+	}
 	if (ret != 0) {
 		switch (ret) {
 		case LIBUSB_ERROR_BUSY:
