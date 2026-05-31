@@ -133,6 +133,44 @@ struct DSL_setting {
 #define DSL_SETTING_SYNC      0xf5a5f5a5
 #define DSL_SETTING_END_SYNC  0xfa5afa5a
 
+/*
+ * Bit positions within DSL_setting.mode (mirrors DSView dsl.c).
+ * Only the ones the V2 LOGIC path actually uses are listed here.
+ */
+#define DS_MODE_TRIG_EN_BIT     0
+#define DS_MODE_CLK_TYPE_BIT    1
+#define DS_MODE_CLK_EDGE_BIT    2
+#define DS_MODE_RLE_MODE_BIT    3
+#define DS_MODE_HALF_MODE_BIT   5
+#define DS_MODE_QUAR_MODE_BIT   6
+#define DS_MODE_FILTER_BIT      8
+#define DS_MODE_STRIG_MODE_BIT 11
+#define DS_MODE_STREAM_MODE_BIT 12
+
+/*
+ * Channel-mode table. One entry per DSLogic Plus channel-count /
+ * samplerate preset that the FPGA supports. Mirrors DSView's
+ * struct DSL_channels with only the fields the LOGIC capture path needs.
+ *
+ * `id` is a stable numeric handle exposed via SR_CONF_CHANNEL_MODE so
+ * the user can pick "16 channels buffered at up to 100 MHz" vs
+ * "3 channels streamed at up to 100 MHz", etc.
+ */
+struct dslogic_channel_mode {
+	uint8_t  id;
+	gboolean stream;
+	uint16_t num_channels;
+	uint64_t min_samplerate;
+	uint64_t max_samplerate;
+	uint64_t hw_max_samplerate;
+	uint8_t  pre_div;
+	const char *descr;
+};
+
+SR_PRIV const struct dslogic_channel_mode *dslogic_plus_channel_modes(size_t *count);
+SR_PRIV const struct dslogic_channel_mode *dslogic_plus_channel_mode_default(void);
+SR_PRIV const struct dslogic_channel_mode *dslogic_plus_channel_mode_by_id(uint8_t id);
+
 /* Transport primitives. */
 SR_PRIV int command_ctl_wr_v2(libusb_device_handle *devhdl, struct ctl_wr_cmd cmd);
 SR_PRIV int command_ctl_rd_v2(libusb_device_handle *devhdl, struct ctl_rd_cmd cmd);
