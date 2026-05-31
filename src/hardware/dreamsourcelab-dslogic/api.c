@@ -476,7 +476,7 @@ static int config_get(uint32_t key, GVariant **data,
 		*data = g_variant_new_boolean(devc->rle_mode);
 		break;
 	case SR_CONF_FILTER:
-		*data = g_variant_new_string(devc->filter ? "1T" : "None");
+		*data = g_variant_new_boolean(devc->filter);
 		break;
 	case SR_CONF_CONTINUOUS:
 		*data = g_variant_new_boolean(devc->continuous_mode);
@@ -537,13 +537,9 @@ static int config_set(uint32_t key, GVariant *data,
 	case SR_CONF_RLE:
 		devc->rle_mode = g_variant_get_boolean(data);
 		break;
-	case SR_CONF_FILTER: {
-		const char *s = g_variant_get_string(data, NULL);
-		devc->filter = s && (g_ascii_strcasecmp(s, "1T") == 0
-			|| g_ascii_strcasecmp(s, "on") == 0
-			|| g_ascii_strcasecmp(s, "true") == 0);
+	case SR_CONF_FILTER:
+		devc->filter = g_variant_get_boolean(data);
 		break;
-	}
 	case SR_CONF_CONTINUOUS:
 		devc->continuous_mode = g_variant_get_boolean(data);
 		if (devc->profile->protocol_version == DSL_PROTO_V2) {
