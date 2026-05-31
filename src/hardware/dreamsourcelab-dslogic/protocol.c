@@ -1232,7 +1232,16 @@ static int start_transfers(const struct sr_dev_inst *sdi)
 		devc->submitted_transfers++;
 	}
 
-	std_session_send_df_header(sdi);
+	/*
+	 * NOTE: DF_HEADER is emitted exactly once per session by
+	 * dslogic_acquisition_start, not here. start_transfers is re-entered
+	 * on every chunk_loop re-arm via trigger_receive; emitting DF_HEADER
+	 * here would tell sigrok-cli's session loop to call
+	 * setup_output_format again, which creates a fresh srzip output
+	 * context with zip_created=FALSE, and the next DF_LOGIC then
+	 * unlinks the .sr file and starts a new archive - silently losing
+	 * all data from prior chunks.
+	 */
 
 	return SR_OK;
 }
@@ -1351,6 +1360,16 @@ SR_PRIV int dslogic_acquisition_start(const struct sr_dev_inst *sdi)
 	}
 
 	usb_source_add(sdi->session, devc->ctx, timeout, receive_data, drvc);
+
+	/*
+	 * Emit DF_HEADER once per session, BEFORE the first arm. Used to
+	 * live at the bottom of start_transfers, but in chunk_loop mode
+	 * start_transfers runs per re-arm and re-emitted DF_HEADER caused
+	 * sigrok-cli to re-initialize its output module, which made srzip
+	 * unlink and recreate the .sr file each chunk - silently dropping
+	 * all prior chunks' data.
+	 */
+	std_session_send_df_header(sdi);
 
 	/* Stop any prior acquisition, then arm and start. Matches DSView's order
 	 * at dslogic.c (STOP -> arm -> START). */
