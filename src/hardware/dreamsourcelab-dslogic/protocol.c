@@ -845,6 +845,37 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 		break;
 	}
 
+	/*
+	 * Stream+RLE wall-clock cutoff. Arm the deadline on the first
+	 * non-empty transfer (so capture-start = first sample seen) and
+	 * abort the moment we cross it. limit_samples/samplerate is the
+	 * user-requested capture duration (sigrok-cli's --time translates
+	 * to a samples budget at this samplerate); the 10% grace lets the
+	 * FX2 drain its in-flight bytes before we cancel.
+	 */
+	if (devc->continuous_mode && devc->rle_mode
+			&& transfer->actual_length > 0
+			&& devc->wallclock_deadline_us == 0
+			&& devc->limit_samples && devc->cur_samplerate) {
+		gint64 dur_us = (gint64)((double)devc->limit_samples /
+				(double)devc->cur_samplerate * 1e6 * 1.1);
+		devc->wallclock_deadline_us = g_get_monotonic_time() + dur_us;
+		sr_info("Stream+RLE wall-clock deadline armed at +%" PRId64
+			" us (%.2f s)", dur_us, dur_us / 1e6);
+	}
+	if (devc->wallclock_deadline_us
+			&& g_get_monotonic_time() >= devc->wallclock_deadline_us) {
+		sr_info("Stream+RLE: wall-clock deadline reached "
+			"(sent_samples=%u of budget=%" PRIu64 "); "
+			"FPGA has emitted all samples it captured.",
+			devc->sent_samples,
+			devc->actual_samples ? devc->actual_samples
+					     : devc->limit_samples);
+		abort_acquisition(devc);
+		free_transfer(transfer);
+		return;
+	}
+
 	if (transfer->actual_length == 0 || packet_has_error) {
 		devc->empty_transfer_count++;
 		if (devc->empty_transfer_count > MAX_EMPTY_TRANSFERS) {
@@ -852,6 +883,19 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 			 * The FX2 gave up. End the acquisition, the frontend
 			 * will work out that the samplecount is short.
 			 */
+			sr_info("Aborting acquisition after %u empty transfers; "
+				"sent_samples=%u, budget=%" PRIu64 ", "
+				"continuous=%d, rle=%d. The FPGA stopped "
+				"emitting data before reaching the requested "
+				"sample budget (likely RLE/USB-bandwidth "
+				"overflow in stream+RLE, or end-of-capture "
+				"in buffered mode).",
+				devc->empty_transfer_count,
+				devc->sent_samples,
+				devc->actual_samples ? devc->actual_samples
+						     : devc->limit_samples,
+				(int)devc->continuous_mode,
+				(int)devc->rle_mode);
 			abort_acquisition(devc);
 			free_transfer(transfer);
 		} else {
@@ -1003,6 +1047,7 @@ static int start_transfers(const struct sr_dev_inst *sdi)
 	devc->acq_aborted = FALSE;
 	devc->empty_transfer_count = 0;
 	devc->submitted_transfers = 0;
+	devc->wallclock_deadline_us = 0;
 
 	g_free(devc->transfers);
 	devc->transfers = g_try_malloc0(sizeof(*devc->transfers) * num_transfers);

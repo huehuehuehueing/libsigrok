@@ -161,6 +161,18 @@ struct dev_context {
 
 	gboolean acq_aborted;
 
+	/*
+	 * Wall-clock deadline for stream+RLE captures, in microseconds
+	 * (monotonic). Set in receive_transfer on the first non-empty
+	 * transfer to (now + limit_samples/samplerate * 1.1). Used to
+	 * abort once the FPGA's expected runtime has elapsed: in stream+RLE
+	 * sent_samples is counted by raw-byte-arrival rate, which is
+	 * decoupled from wall-clock by the RLE compression ratio, so the
+	 * sample-count budget alone never trips a clean exit at the
+	 * user-requested --time. 0 = not active.
+	 */
+	gint64 wallclock_deadline_us;
+
 	unsigned int sent_samples;
 	int submitted_transfers;
 	int empty_transfer_count;
