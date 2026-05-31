@@ -384,9 +384,9 @@ static int dev_open(struct sr_dev_inst *sdi)
 
 
 	if ((ret = devc->ops->fpga_firmware_upload(sdi)) != SR_OK)
-		return ret;
+		goto fail_release;
 	if ((ret = devc->ops->security_check(sdi)) != SR_OK)
-		return ret;
+		goto fail_release;
 	/* DSView writes VTH_ADDR right after dsl_dev_open returns
 	 * (dslogic.c). Without this, the FPGA threshold DAC
 	 * is uninitialised and subsequent arm-sequence status polls may
@@ -404,6 +404,19 @@ static int dev_open(struct sr_dev_inst *sdi)
 	}
 
 	return SR_OK;
+
+fail_release:
+	/*
+	 * dev_open failed AFTER we claimed the interface. libsigrok will not
+	 * call dev_close on a dev_open that returned non-OK, so we must
+	 * unwind the claim ourselves. Without this, the next dev_open's
+	 * libusb_claim_interface returns LIBUSB_ERROR_BUSY (the kernel
+	 * thinks the interface is still in use by us).
+	 */
+	libusb_release_interface(usb->devhdl, USB_INTERFACE);
+	libusb_close(usb->devhdl);
+	usb->devhdl = NULL;
+	return ret;
 }
 
 static int dev_close(struct sr_dev_inst *sdi)
