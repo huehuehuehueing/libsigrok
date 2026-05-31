@@ -134,6 +134,8 @@ struct dslogic_profile {
 struct dev_context {
 	const struct dslogic_profile *profile;
 	const struct dslogic_protocol_ops *ops;
+	/* V2 only: stable ID of the active channel mode (DSLogic Plus presets). */
+	uint8_t ch_mode_id;
 	/*
 	 * Since we can't keep track of a DSLogic device after upgrading
 	 * the firmware (it renumerates into a different device address

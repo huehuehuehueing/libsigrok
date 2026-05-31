@@ -693,6 +693,8 @@ SR_PRIV struct dev_context *dslogic_dev_new(void)
 	devc->capture_ratio = 0;
 	devc->continuous_mode = FALSE;
 	devc->clock_edge = DS_EDGE_RISING;
+	/* DSLogic Plus default: 16 channels, buffered, max 100 MHz. */
+	devc->ch_mode_id = dslogic_plus_channel_mode_default()->id;
 
 	return devc;
 }

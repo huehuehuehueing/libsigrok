@@ -431,6 +431,61 @@ static inline uint32_t div_round_up(uint64_t a, uint64_t b)
 }
 
 /*
+ * Channel-mode table for the DSLogic Plus family (PIDs 0x0020, 0x0034).
+ * Values mirror DSView's channel_modes[] entries for DSL_BUFFER100x16,
+ * DSL_BUFFER200x8, DSL_BUFFER400x4, DSL_STREAM20x16, DSL_STREAM25x12,
+ * DSL_STREAM50x6, DSL_STREAM100x3.
+ */
+static const struct dslogic_channel_mode dslogic_plus_modes[] = {
+	/* id    stream  ch  min_sr      max_sr      hw_max     pre  descr */
+	{   0,   FALSE,  16, SR_KHZ(50), SR_MHZ(100), SR_MHZ(100), 1,
+		"16 channels, buffered (max 100 MHz)" },
+	{   1,   FALSE,   8, SR_KHZ(50), SR_MHZ(200), SR_MHZ(100), 1,
+		"8 channels, buffered (max 200 MHz)" },
+	{   2,   FALSE,   4, SR_KHZ(50), SR_MHZ(400), SR_MHZ(100), 1,
+		"4 channels, buffered (max 400 MHz)" },
+	{   3,   TRUE,   16, SR_KHZ(50), SR_MHZ(20),  SR_MHZ(100), 1,
+		"16 channels, streaming (max 20 MHz)" },
+	{   4,   TRUE,   12, SR_KHZ(50), SR_MHZ(25),  SR_MHZ(100), 1,
+		"12 channels, streaming (max 25 MHz)" },
+	{   5,   TRUE,    6, SR_KHZ(50), SR_MHZ(50),  SR_MHZ(100), 1,
+		"6 channels, streaming (max 50 MHz)" },
+	{   6,   TRUE,    3, SR_KHZ(50), SR_MHZ(100), SR_MHZ(100), 1,
+		"3 channels, streaming (max 100 MHz)" },
+};
+
+#define DSLOGIC_PLUS_DEFAULT_CH_MODE_ID 0   /* matches DSView's DSL_BUFFER100x16 */
+
+SR_PRIV const struct dslogic_channel_mode *dslogic_plus_channel_modes(size_t *count)
+{
+	if (count)
+		*count = ARRAY_SIZE(dslogic_plus_modes);
+	return dslogic_plus_modes;
+}
+
+SR_PRIV const struct dslogic_channel_mode *dslogic_plus_channel_mode_default(void)
+{
+	return &dslogic_plus_modes[DSLOGIC_PLUS_DEFAULT_CH_MODE_ID];
+}
+
+SR_PRIV const struct dslogic_channel_mode *dslogic_plus_channel_mode_by_id(uint8_t id)
+{
+	size_t i;
+	for (i = 0; i < ARRAY_SIZE(dslogic_plus_modes); i++)
+		if (dslogic_plus_modes[i].id == id)
+			return &dslogic_plus_modes[i];
+	return NULL;
+}
+
+static const struct dslogic_channel_mode *v2_current_channel_mode(const struct dev_context *devc)
+{
+	const struct dslogic_channel_mode *m;
+
+	m = dslogic_plus_channel_mode_by_id(devc->ch_mode_id);
+	return m ? m : dslogic_plus_channel_mode_default();
+}
+
+/*
  * Build the struct DSL_setting that is bulk-written to the FPGA.
  *
  * Header field encoding: (register_index << 8) | word_count
@@ -448,12 +503,11 @@ static void v2_build_default_setting(const struct sr_dev_inst *sdi,
 				     struct DSL_setting *s)
 {
 	struct dev_context *devc = sdi->priv;
-	/* DSLogic Plus pgl12 (PID 0x0034) channel mode DSL_STREAM20x16_3DN2 */
-	const uint64_t hw_max_samplerate = SR_MHZ(500);
-	const uint32_t pre_div = 5;
+	const struct dslogic_channel_mode *cm = v2_current_channel_mode(devc);
 	uint32_t tmp_u32;
 	uint64_t cur_sr;
 	uint64_t count_units;
+	uint32_t ch_en_mask;
 	int i;
 
 	memset(s, 0, sizeof(*s));
@@ -473,8 +527,13 @@ static void v2_build_default_setting(const struct sr_dev_inst *sdi,
 	s->fgain_header     = 0x0c01;   /* reg 0xc,  1 word  */
 	s->trig_header      = 0x40a0;   /* reg 0x40, 0xa0 words */
 
-	/* mode = 0: logic capture, internal clock, no compression, no trigger. */
+	/*
+	 * mode = logic capture, no trigger; stream bit set in stream channel
+	 * modes (mirrors DSView's STREAM_MODE_BIT in dsl.c).
+	 */
 	s->mode = 0;
+	if (cm->stream)
+		s->mode |= (1 << DS_MODE_STREAM_MODE_BIT);
 
 	/*
 	 * Samplerate divider (dsl.c, LOGIC mode branch).
@@ -485,9 +544,9 @@ static void v2_build_default_setting(const struct sr_dev_inst *sdi,
 	 *   div_h  += tmp_u32 >> 16
 	 */
 	cur_sr = devc->cur_samplerate ? devc->cur_samplerate : SR_MHZ(1);
-	tmp_u32 = div_round_up(hw_max_samplerate, cur_sr);
-	s->div_h = ((tmp_u32 >= pre_div) ? (pre_div - 1) : (tmp_u32 - 1)) << 8;
-	tmp_u32 = div_round_up(tmp_u32, pre_div);
+	tmp_u32 = div_round_up(cm->hw_max_samplerate, cur_sr);
+	s->div_h = ((tmp_u32 >= cm->pre_div) ? (cm->pre_div - 1) : (tmp_u32 - 1)) << 8;
+	tmp_u32 = div_round_up(tmp_u32, cm->pre_div);
 	s->div_l = tmp_u32 & 0x0000ffff;
 	s->div_h = (uint16_t)(s->div_h + (tmp_u32 >> 16));
 
@@ -510,9 +569,17 @@ static void v2_build_default_setting(const struct sr_dev_inst *sdi,
 	s->dso_cnt_l = 0;
 	s->dso_cnt_h = 0;
 
-	/* All 16 logic channels enabled (dsl.c). */
-	s->ch_en_l = 0xffff;
-	s->ch_en_h = 0x0000;
+	/*
+	 * Enable the low-N channels for the active mode (mirrors DSView's
+	 * default "use channels 0..num_channels-1"). 16-bit mask, channels
+	 * 16..31 not present on DSLogic Plus so ch_en_h stays 0.
+	 */
+	if (cm->num_channels >= 16)
+		ch_en_mask = 0xffff;
+	else
+		ch_en_mask = (1U << cm->num_channels) - 1U;
+	s->ch_en_l = (uint16_t)ch_en_mask;
+	s->ch_en_h = 0;
 
 	/* fgain = 0 (no digital fine gain in logic mode). */
 	s->fgain = 0;
