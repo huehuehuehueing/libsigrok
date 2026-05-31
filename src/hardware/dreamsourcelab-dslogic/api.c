@@ -543,9 +543,15 @@ static int config_set(uint32_t key, GVariant *data,
 		devc->continuous_mode = g_variant_get_boolean(data);
 		if (devc->profile->protocol_version == DSL_PROTO_V2) {
 			/* Re-pick the channel mode for the new stream/buffer
-			 * choice; uses the current samplerate as the hint. */
+			 * choice; uses current samplerate + enabled-channel
+			 * count as hints. */
+			uint16_t m = enabled_channel_mask(sdi);
+			unsigned int hi = 0, i;
+			for (i = 0; i < 16; i++)
+				if (m & (1U << i)) hi = i + 1;
 			devc->ch_mode_id = dslogic_plus_auto_pick_mode_id(
-				devc->cur_samplerate, devc->continuous_mode);
+				devc->cur_samplerate, devc->continuous_mode,
+				hi ? hi : 1);
 		}
 		break;
 	case SR_CONF_CLOCK_EDGE:

@@ -313,7 +313,7 @@ SR_PRIV int dslogic_fpga_firmware_upload(const struct sr_dev_inst *sdi)
 	return result;
 }
 
-static unsigned int enabled_channel_count(const struct sr_dev_inst *sdi)
+SR_PRIV unsigned int enabled_channel_count(const struct sr_dev_inst *sdi)
 {
 	unsigned int count = 0;
 	for (const GSList *l = sdi->channels; l; l = l->next) {
@@ -324,7 +324,7 @@ static unsigned int enabled_channel_count(const struct sr_dev_inst *sdi)
 	return count;
 }
 
-static uint16_t enabled_channel_mask(const struct sr_dev_inst *sdi)
+SR_PRIV uint16_t enabled_channel_mask(const struct sr_dev_inst *sdi)
 {
 	unsigned int mask = 0;
 	for (const GSList *l = sdi->channels; l; l = l->next) {
