@@ -492,29 +492,45 @@ static const struct dslogic_channel_mode *v2_current_channel_mode(const struct d
  * way: 16/12/6/3 ch at 20/25/50/100 MHz. The smallest mode whose
  * max_samplerate covers the requested rate wins.
  */
-SR_PRIV uint8_t dslogic_plus_auto_pick_mode_id(uint64_t samplerate, gboolean continuous)
+/*
+ * Pick the channel mode that fits the requested samplerate and the
+ * smallest channel-count >= `need_channels` (max-enabled-channel-index+1)
+ * under continuous_mode. Smaller channel counts use less USB bandwidth,
+ * letting higher sample rates fit USB 2.0 HS's ~50 MB/s ceiling.
+ */
+SR_PRIV uint8_t dslogic_plus_auto_pick_mode_id(uint64_t samplerate,
+		gboolean continuous, unsigned int need_channels)
 {
 	size_t i, n;
 	const struct dslogic_channel_mode *modes = dslogic_plus_channel_modes(&n);
 	const struct dslogic_channel_mode *best = NULL;
 
+	if (need_channels == 0)
+		need_channels = 1;
+
 	for (i = 0; i < n; i++) {
 		if (modes[i].stream != continuous)
 			continue;
+		if (modes[i].num_channels < need_channels)
+			continue;
 		if (samplerate > modes[i].max_samplerate)
 			continue;
-		/* Prefer the mode with the highest channel count that still
-		 * supports this samplerate. */
-		if (!best || modes[i].num_channels > best->num_channels)
+		/*
+		 * Prefer the mode with the SMALLEST num_channels that still
+		 * fits — minimises USB bandwidth so high samplerates can
+		 * stream cleanly.
+		 */
+		if (!best || modes[i].num_channels < best->num_channels)
 			best = &modes[i];
 	}
 	if (best)
 		return best->id;
-	/* No exact fit (rate too high for any stream/buffer mode): fall
-	 * back to the mode with the highest max_samplerate in this
-	 * stream/buffer category. */
+	/* No exact fit: fall back to the mode with the most channels at
+	 * the highest max_samplerate that satisfies need_channels. */
 	for (i = 0; i < n; i++) {
 		if (modes[i].stream != continuous)
+			continue;
+		if (modes[i].num_channels < need_channels)
 			continue;
 		if (!best || modes[i].max_samplerate > best->max_samplerate)
 			best = &modes[i];
@@ -622,14 +638,23 @@ static void v2_build_default_setting(const struct sr_dev_inst *sdi,
 	s->dso_cnt_h = 0;
 
 	/*
-	 * Enable the low-N channels for the active mode (mirrors DSView's
-	 * default "use channels 0..num_channels-1"). 16-bit mask, channels
-	 * 16..31 not present on DSLogic Plus so ch_en_h stays 0.
+	 * Channel enable mask = sigrok's enabled channels AND the active
+	 * mode's capability cap. This drops bandwidth on the FPGA->host
+	 * link to only what the user asked to see, letting high samplerates
+	 * fit USB 2.0 HS's ~50 MB/s ceiling. If no channels are enabled
+	 * (degenerate), fall back to ch0.
 	 */
-	if (cm->num_channels >= 16)
-		ch_en_mask = 0xffff;
-	else
-		ch_en_mask = (1U << cm->num_channels) - 1U;
+	{
+		uint16_t cap_mask;
+		uint16_t user_mask = enabled_channel_mask(sdi);
+		if (cm->num_channels >= 16)
+			cap_mask = 0xffff;
+		else
+			cap_mask = (uint16_t)((1U << cm->num_channels) - 1U);
+		ch_en_mask = user_mask & cap_mask;
+		if (ch_en_mask == 0)
+			ch_en_mask = 1;
+	}
 	s->ch_en_l = (uint16_t)ch_en_mask;
 	s->ch_en_h = 0;
 
@@ -789,14 +814,28 @@ static int v2_acquisition_stop(const struct sr_dev_inst *sdi)
 	return command_ctl_wr_v2(usb->devhdl, wr);
 }
 
+/* Compute "need_channels" as max_enabled_index + 1, so contiguous-low
+ * channels (0..N-1) trigger a small mode while sparse selections fall
+ * back to a wider mode that covers the highest index in use. */
+static unsigned int v2_max_enabled_plus_one(const struct sr_dev_inst *sdi)
+{
+	uint16_t mask = enabled_channel_mask(sdi);
+	unsigned int hi = 0, i;
+	for (i = 0; i < 16; i++) {
+		if (mask & (1U << i))
+			hi = i + 1;
+	}
+	return hi ? hi : 1;
+}
+
 static int v2_set_samplerate(const struct sr_dev_inst *sdi, uint64_t rate)
 {
 	struct dev_context *devc = sdi->priv;
 	devc->cur_samplerate = rate;
-	/* Auto-pick the channel mode that fits this rate under the current
-	 * stream/buffer choice. The setting struct is rebuilt at arm time,
-	 * so updating ch_mode_id here is enough. */
-	devc->ch_mode_id = dslogic_plus_auto_pick_mode_id(rate, devc->continuous_mode);
+	/* Auto-pick the channel mode that fits this rate + enabled-channel
+	 * count under the current stream/buffer choice. */
+	devc->ch_mode_id = dslogic_plus_auto_pick_mode_id(rate,
+		devc->continuous_mode, v2_max_enabled_plus_one(sdi));
 	return SR_OK;
 }
 

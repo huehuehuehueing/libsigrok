@@ -170,7 +170,8 @@ struct dslogic_channel_mode {
 SR_PRIV const struct dslogic_channel_mode *dslogic_plus_channel_modes(size_t *count);
 SR_PRIV const struct dslogic_channel_mode *dslogic_plus_channel_mode_default(void);
 SR_PRIV const struct dslogic_channel_mode *dslogic_plus_channel_mode_by_id(uint8_t id);
-SR_PRIV uint8_t dslogic_plus_auto_pick_mode_id(uint64_t samplerate, gboolean continuous);
+SR_PRIV uint8_t dslogic_plus_auto_pick_mode_id(uint64_t samplerate,
+		gboolean continuous, unsigned int need_channels);
 
 /* Transport primitives. */
 SR_PRIV int command_ctl_wr_v2(libusb_device_handle *devhdl, struct ctl_wr_cmd cmd);
