@@ -271,7 +271,9 @@ static int v2_fpga_firmware_upload(const struct sr_dev_inst *sdi)
 	struct dev_context *devc = sdi->priv;
 	struct sr_resource bitstream;
 	struct ctl_wr_cmd wr;
+	struct ctl_rd_cmd rd;
 	unsigned char *buf;
+	uint8_t hw_status = 0;
 	int transferred;
 	int result, ret;
 	const char *name = NULL;
@@ -281,6 +283,27 @@ static int v2_fpga_firmware_upload(const struct sr_dev_inst *sdi)
 	} else {
 		sr_err("v2: no FPGA firmware for model '%s'.", devc->profile->model);
 		return SR_ERR;
+	}
+
+	/*
+	 * If the FPGA is already configured (PulseView Stop+Run or quick
+	 * sigrok-cli reopen on the same device), skip the bitstream upload
+	 * and do the same dessert-clear write DSView does in its
+	 * already-configured branch (dsl_dev_open at dsl.c). Re-running
+	 * the full PROG_B cycle on a live FPGA wedges the post-INTRDY
+	 * FPGA_DONE poll because the previous capture engine has not been
+	 * torn down on the host side.
+	 */
+	rd.header.dest   = DSL_CTL_HW_STATUS;
+	rd.header.offset = 0;
+	rd.header.size   = 1;
+	rd.data          = &hw_status;
+	if (command_ctl_rd_v2(hdl, rd) == SR_OK && (hw_status & bmFPGA_DONE)) {
+		sr_info("FPGA already configured (HW_STATUS=0x%02x); skipping bitstream upload.",
+			hw_status);
+		if (dsl_wr_reg_v2(sdi, CTR0_ADDR, 0) != SR_OK)
+			sr_warn("CTR0_ADDR dessert-clear failed on warm path.");
+		return SR_OK;
 	}
 
 	sr_dbg("Uploading FPGA bitstream '%s' via V2 envelope protocol.", name);
