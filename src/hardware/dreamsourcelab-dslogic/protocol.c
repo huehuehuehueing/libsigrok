@@ -726,6 +726,93 @@ static void finish_acquisition(struct sr_dev_inst *sdi)
 	g_free(devc->deinterleave_buffer);
 }
 
+/* Forward decl: trigger_receive is defined alongside the V1 acquisition
+ * paths near the end of this file; rearm_chunk_in_place needs it as a
+ * libusb callback for the trigger-position transfer. */
+static void LIBUSB_CALL trigger_receive(struct libusb_transfer *transfer);
+
+static void rearm_chunk_in_place(struct sr_dev_inst *sdi)
+{
+	struct dev_context *devc = sdi->priv;
+	struct sr_usb_dev_inst *usb = sdi->conn;
+	struct dslogic_trigger_pos *tpos;
+	struct libusb_transfer *transfer;
+	gint64 t_start_us;
+	int ret;
+
+	t_start_us = g_get_monotonic_time();
+
+	/* Per-chunk state. total_deadline_us preserved across chunks. */
+	devc->acq_aborted = FALSE;
+	devc->rearm_pending = FALSE;
+	devc->sent_samples = 0;
+	devc->actual_samples = 0;
+	devc->empty_transfer_count = 0;
+	devc->wallclock_deadline_us = 0;
+
+	g_free(devc->transfers);
+	devc->transfers = NULL;
+	devc->num_transfers = 0;
+	g_free(devc->deinterleave_buffer);
+	devc->deinterleave_buffer = NULL;
+
+	/* Chunk boundary marker for downstream decoders. */
+	std_session_send_df_trigger(sdi);
+
+	if ((ret = devc->ops->acquisition_stop(sdi)) != SR_OK)
+		goto fail;
+	if ((ret = devc->ops->fpga_config(sdi)) != SR_OK)
+		goto fail;
+	if ((ret = devc->ops->acquisition_start(sdi)) != SR_OK)
+		goto fail;
+
+	tpos = g_malloc(sizeof(struct dslogic_trigger_pos));
+	transfer = libusb_alloc_transfer(0);
+	libusb_fill_bulk_transfer(transfer, usb->devhdl,
+			6 | LIBUSB_ENDPOINT_IN,
+			(unsigned char *)tpos,
+			sizeof(struct dslogic_trigger_pos),
+			trigger_receive, (void *)sdi, 0);
+	if ((ret = libusb_submit_transfer(transfer)) < 0) {
+		sr_err("Re-arm trigger transfer submit failed: %s.",
+		       libusb_error_name(ret));
+		libusb_free_transfer(transfer);
+		g_free(tpos);
+		goto fail;
+	}
+
+	devc->transfers = g_try_malloc0(sizeof(*devc->transfers));
+	if (!devc->transfers) {
+		sr_err("Re-arm transfer table malloc failed.");
+		goto fail;
+	}
+	devc->num_transfers = 1;
+	devc->submitted_transfers++;
+	devc->transfers[0] = transfer;
+
+	sr_dbg("Re-armed chunk in %.2f ms.",
+	       (g_get_monotonic_time() - t_start_us) / 1000.0);
+	return;
+
+fail:
+	sr_err("Chunk re-arm failed (%d); ending session.", ret);
+	finish_acquisition(sdi);
+}
+
+/*
+ * Re-arm the FPGA for the next chunk without ending the libsigrok session.
+ *
+ * Called from free_transfer when the previous chunk's transfers have all
+ * been drained and rearm_pending was set. Sends an SR_DF_TRIGGER marker so
+ * downstream decoders can see the chunk boundary, re-runs the arm sequence
+ * (stop / fpga_config / acquisition_start), and re-submits a fresh trigger-
+ * position transfer so the next chunk's data will flow on the same session.
+ *
+ * usb_source_add is NOT re-issued: the libusb event source is owned by the
+ * outer session and remains valid across chunks. Per-chunk counters
+ * (sent_samples, actual_samples, empty_transfer_count, wallclock_deadline_us)
+ * are reset; total_deadline_us is preserved.
+ */
 static void free_transfer(struct libusb_transfer *transfer)
 {
 	struct sr_dev_inst *sdi;
@@ -747,8 +834,25 @@ static void free_transfer(struct libusb_transfer *transfer)
 	}
 
 	devc->submitted_transfers--;
-	if (devc->submitted_transfers == 0)
-		finish_acquisition(sdi);
+	/*
+	 * Don't kick the re-arm here. We're inside a libusb callback;
+	 * issuing synchronous USB control transfers from this context
+	 * collides with libusb's internal transfer machinery and returns
+	 * LIBUSB_ERROR_BUSY. Instead let the periodic receive_data tick
+	 * notice submitted_transfers == 0 + rearm_pending and run the
+	 * re-arm from a clean stack.
+	 *
+	 * For the no-rearm case (session end), finish_acquisition is
+	 * still safe to call here because it only touches libsigrok
+	 * bookkeeping (no USB I/O).
+	 */
+	if (devc->submitted_transfers == 0) {
+		if (!(devc->rearm_pending
+				&& devc->total_deadline_us
+				&& g_get_monotonic_time() < devc->total_deadline_us)) {
+			finish_acquisition(sdi);
+		}
+	}
 }
 
 static void resubmit_transfer(struct libusb_transfer *transfer)
@@ -848,29 +952,39 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 	/*
 	 * Stream+RLE wall-clock cutoff. Arm the deadline on the first
 	 * non-empty transfer (so capture-start = first sample seen) and
-	 * abort the moment we cross it. limit_samples/samplerate is the
-	 * user-requested capture duration (sigrok-cli's --time translates
-	 * to a samples budget at this samplerate); the 10% grace lets the
-	 * FX2 drain its in-flight bytes before we cancel.
+	 * abort the moment we cross it. budget_for_deadline is the
+	 * per-chunk capture duration (chunk_samples in chunk_loop mode,
+	 * limit_samples otherwise); the 10% grace lets the FX2 drain its
+	 * in-flight bytes before we cancel.
 	 */
 	if (devc->continuous_mode && devc->rle_mode
 			&& transfer->actual_length > 0
 			&& devc->wallclock_deadline_us == 0
-			&& devc->limit_samples && devc->cur_samplerate) {
-		gint64 dur_us = (gint64)((double)devc->limit_samples /
-				(double)devc->cur_samplerate * 1e6 * 1.1);
-		devc->wallclock_deadline_us = g_get_monotonic_time() + dur_us;
-		sr_info("Stream+RLE wall-clock deadline armed at +%" PRId64
-			" us (%.2f s)", dur_us, dur_us / 1e6);
+			&& devc->cur_samplerate) {
+		uint64_t budget_for_deadline = devc->chunk_loop
+			? devc->chunk_samples : devc->limit_samples;
+		if (budget_for_deadline) {
+			gint64 dur_us = (gint64)((double)budget_for_deadline /
+					(double)devc->cur_samplerate * 1e6 * 1.1);
+			devc->wallclock_deadline_us =
+				g_get_monotonic_time() + dur_us;
+			sr_dbg("Stream+RLE wall-clock deadline armed at "
+			       "+%" PRId64 " us (%.2f s)", dur_us, dur_us / 1e6);
+		}
 	}
 	if (devc->wallclock_deadline_us
 			&& g_get_monotonic_time() >= devc->wallclock_deadline_us) {
-		sr_info("Stream+RLE: wall-clock deadline reached "
-			"(sent_samples=%u of budget=%" PRIu64 "); "
-			"FPGA has emitted all samples it captured.",
-			devc->sent_samples,
-			devc->actual_samples ? devc->actual_samples
-					     : devc->limit_samples);
+		sr_dbg("Stream+RLE: wall-clock deadline reached "
+		       "(sent_samples=%u of budget=%" PRIu64 ").",
+		       devc->sent_samples,
+		       devc->actual_samples ? devc->actual_samples
+					    : devc->limit_samples);
+		/* If chunk_loop is on and we're still inside the session
+		 * deadline, request a re-arm instead of ending the session. */
+		if (devc->chunk_loop && devc->total_deadline_us
+				&& g_get_monotonic_time() < devc->total_deadline_us) {
+			devc->rearm_pending = TRUE;
+		}
 		abort_acquisition(devc);
 		free_transfer(transfer);
 		return;
@@ -960,6 +1074,12 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 	}
 
 	if (budget && devc->sent_samples >= budget) {
+		/* Per-chunk budget consumed. In chunk_loop, queue a re-arm
+		 * unless the overall session deadline has elapsed. */
+		if (devc->chunk_loop && devc->total_deadline_us
+				&& g_get_monotonic_time() < devc->total_deadline_us) {
+			devc->rearm_pending = TRUE;
+		}
 		abort_acquisition(devc);
 		free_transfer(transfer);
 	} else
@@ -970,6 +1090,7 @@ static int receive_data(int fd, int revents, void *cb_data)
 {
 	struct timeval tv;
 	struct drv_context *drvc;
+	GSList *l;
 
 	(void)fd;
 	(void)revents;
@@ -978,6 +1099,30 @@ static int receive_data(int fd, int revents, void *cb_data)
 
 	tv.tv_sec = tv.tv_usec = 0;
 	libusb_handle_events_timeout(drvc->sr_ctx->libusb_ctx, &tv);
+
+	/*
+	 * Drain any deferred per-chunk re-arms. free_transfer can't issue
+	 * synchronous control transfers from inside its libusb callback
+	 * (returns LIBUSB_ERROR_BUSY), so it just sets rearm_pending +
+	 * lets the prior chunk's transfers drain. Here, on a clean stack,
+	 * we re-arm the FPGA and submit a fresh trigger-position transfer
+	 * for the next chunk.
+	 */
+	for (l = drvc->instances; l; l = l->next) {
+		struct sr_dev_inst *sdi = l->data;
+		struct dev_context *devc = sdi->priv;
+		if (devc && devc->rearm_pending
+				&& devc->submitted_transfers == 0
+				&& devc->total_deadline_us
+				&& g_get_monotonic_time() < devc->total_deadline_us) {
+			rearm_chunk_in_place(sdi);
+		} else if (devc && devc->rearm_pending
+				&& devc->submitted_transfers == 0) {
+			/* Total deadline elapsed during drain. End the session. */
+			devc->rearm_pending = FALSE;
+			finish_acquisition(sdi);
+		}
+	}
 
 	return TRUE;
 }
@@ -1129,18 +1274,22 @@ static void LIBUSB_CALL trigger_receive(struct libusb_transfer *transfer)
 			 * almost immediately. Skip the shortening entirely for
 			 * streaming and let limit_samples be the stop budget.
 			 */
+			/* Per-chunk budget when chunk_loop is active. */
+			uint64_t per_chunk = (devc->chunk_loop && devc->chunk_samples)
+				? devc->chunk_samples : devc->limit_samples;
+
 			if (!devc->continuous_mode) {
 				uint64_t remain = ((uint64_t)tpos->remain_cnt_h << 32)
 					| (uint64_t)tpos->remain_cnt_l;
-				if (devc->limit_samples && remain < devc->limit_samples)
-					devc->actual_samples = devc->limit_samples - remain;
+				if (per_chunk && remain < per_chunk)
+					devc->actual_samples = per_chunk - remain;
 				else
-					devc->actual_samples = devc->limit_samples;
-				if (devc->actual_samples != devc->limit_samples)
+					devc->actual_samples = per_chunk;
+				if (devc->actual_samples != per_chunk)
 					sr_info("RLE shortened capture: %" PRIu64 " of %" PRIu64 " samples",
-						devc->actual_samples, devc->limit_samples);
+						devc->actual_samples, per_chunk);
 			} else {
-				devc->actual_samples = devc->limit_samples;
+				devc->actual_samples = per_chunk;
 			}
 		}
 		g_free(tpos);
@@ -1171,6 +1320,35 @@ SR_PRIV int dslogic_acquisition_start(const struct sr_dev_inst *sdi)
 	devc->actual_samples = 0;
 	devc->empty_transfer_count = 0;
 	devc->acq_aborted = FALSE;
+	devc->rearm_pending = FALSE;
+	devc->wallclock_deadline_us = 0;
+
+	/*
+	 * chunk_loop: each chunk captures chunk_samples (default ~500ms of
+	 * samples) and then re-arms. The overall session ends after
+	 * total_deadline_us, derived from --time / limit_samples + a 10%
+	 * grace for drain. When chunk_loop is off, chunk_samples = 0 and
+	 * the existing single-shot semantics apply.
+	 */
+	if (devc->chunk_loop && devc->cur_samplerate && devc->limit_samples) {
+		uint64_t default_chunk = devc->cur_samplerate / 2;  /* 500ms */
+		if (default_chunk == 0)
+			default_chunk = devc->cur_samplerate;
+		devc->chunk_samples = devc->limit_samples < default_chunk
+			? devc->limit_samples : default_chunk;
+		devc->total_deadline_us = g_get_monotonic_time() +
+			(gint64)((double)devc->limit_samples /
+				 (double)devc->cur_samplerate * 1e6 * 1.1);
+		sr_info("chunk_loop: per-chunk %" PRIu64 " samples "
+			"(%.2f s), total deadline +%.2f s",
+			devc->chunk_samples,
+			(double)devc->chunk_samples / devc->cur_samplerate,
+			((double)devc->total_deadline_us -
+			 g_get_monotonic_time()) / 1e6);
+	} else {
+		devc->chunk_samples = 0;
+		devc->total_deadline_us = 0;
+	}
 
 	usb_source_add(sdi->session, devc->ctx, timeout, receive_data, drvc);
 

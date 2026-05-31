@@ -78,6 +78,7 @@ static const uint32_t devopts[] = {
 	SR_CONF_CLOCK_EDGE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_RLE | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_FILTER | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_CHUNK_LOOP | SR_CONF_GET | SR_CONF_SET,
 };
 
 static const int32_t trigger_matches[] = {
@@ -491,6 +492,9 @@ static int config_get(uint32_t key, GVariant **data,
 	case SR_CONF_FILTER:
 		*data = g_variant_new_boolean(devc->filter);
 		break;
+	case SR_CONF_CHUNK_LOOP:
+		*data = g_variant_new_boolean(devc->chunk_loop);
+		break;
 	case SR_CONF_CONTINUOUS:
 		*data = g_variant_new_boolean(devc->continuous_mode);
 		break;
@@ -552,6 +556,9 @@ static int config_set(uint32_t key, GVariant *data,
 		break;
 	case SR_CONF_FILTER:
 		devc->filter = g_variant_get_boolean(data);
+		break;
+	case SR_CONF_CHUNK_LOOP:
+		devc->chunk_loop = g_variant_get_boolean(data);
 		break;
 	case SR_CONF_CONTINUOUS:
 		devc->continuous_mode = g_variant_get_boolean(data);

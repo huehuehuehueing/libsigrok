@@ -164,7 +164,7 @@ struct dev_context {
 	/*
 	 * Wall-clock deadline for stream+RLE captures, in microseconds
 	 * (monotonic). Set in receive_transfer on the first non-empty
-	 * transfer to (now + limit_samples/samplerate * 1.1). Used to
+	 * transfer to (now + chunk_samples/samplerate * 1.1). Used to
 	 * abort once the FPGA's expected runtime has elapsed: in stream+RLE
 	 * sent_samples is counted by raw-byte-arrival rate, which is
 	 * decoupled from wall-clock by the RLE compression ratio, so the
@@ -172,6 +172,22 @@ struct dev_context {
 	 * user-requested --time. 0 = not active.
 	 */
 	gint64 wallclock_deadline_us;
+
+	/*
+	 * Chunk-loop mode: when enabled, the FPGA is automatically re-armed
+	 * the moment a chunk's worth of samples has been drained, instead of
+	 * ending the session. Chunks are sized to chunk_samples (default
+	 * samplerate/2, i.e. ~500ms each). Total session length is bounded
+	 * by total_deadline_us (set from limit_samples + samplerate at acq
+	 * start). An SR_DF_TRIGGER marker is sent between chunks so the
+	 * downstream decoder pipeline can see chunk boundaries. Useful for
+	 * bursty triggered captures (each new trigger fires within at most
+	 * one chunk_samples + arm-latency window).
+	 */
+	gboolean chunk_loop;
+	uint64_t chunk_samples;
+	gint64   total_deadline_us;
+	gboolean rearm_pending;
 
 	unsigned int sent_samples;
 	int submitted_transfers;
