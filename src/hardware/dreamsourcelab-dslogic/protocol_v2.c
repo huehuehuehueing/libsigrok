@@ -552,16 +552,31 @@ SR_PRIV uint8_t dslogic_plus_auto_pick_mode_id(uint64_t samplerate,
  *   is 16 samples (dsl.c: "hardware minimum unit 64" [sic; actually
  *   16 because >>4 == /16]).
  */
+/* Forward decl: defined later, used in v2_build_default_setting. */
+static unsigned int v2_max_enabled_plus_one(const struct sr_dev_inst *sdi);
+
 static void v2_build_default_setting(const struct sr_dev_inst *sdi,
 				     struct DSL_setting *s)
 {
 	struct dev_context *devc = sdi->priv;
-	const struct dslogic_channel_mode *cm = v2_current_channel_mode(devc);
+	const struct dslogic_channel_mode *cm;
 	uint32_t tmp_u32;
 	uint64_t cur_sr;
 	uint64_t count_units;
 	uint32_t ch_en_mask;
 	int i;
+
+	/*
+	 * Re-pick the channel mode here so it sees the FINAL enabled-channel
+	 * mask. sigrok-cli's -C and PulseView's channel checkboxes may
+	 * disable channels AFTER config_set has run for samplerate /
+	 * continuous, so the auto-pick at set-time may have used a stale
+	 * channel count.
+	 */
+	devc->ch_mode_id = dslogic_plus_auto_pick_mode_id(
+		devc->cur_samplerate, devc->continuous_mode,
+		v2_max_enabled_plus_one(sdi));
+	cm = v2_current_channel_mode(devc);
 
 	memset(s, 0, sizeof(*s));
 
@@ -611,6 +626,24 @@ static void v2_build_default_setting(const struct sr_dev_inst *sdi,
 	 *   div_h  += tmp_u32 >> 16
 	 */
 	cur_sr = devc->cur_samplerate ? devc->cur_samplerate : SR_MHZ(1);
+	/*
+	 * Clamp to the active mode's advertised max_samplerate. The FPGA
+	 * will otherwise accept a higher rate via the divider but the
+	 * USB IN endpoint can't sustain it, leading to empty-transfer
+	 * abort ("Device only sent N samples") a few seconds into
+	 * acquisition. Warn loudly so the user knows to either drop a
+	 * channel (to unlock a higher-rate stream mode) or switch off
+	 * continuous mode.
+	 */
+	if (cur_sr > cm->max_samplerate) {
+		sr_warn("Requested samplerate %" PRIu64 " Hz exceeds "
+			"%s's max of %" PRIu64 " Hz; clamping. "
+			"Drop a channel for a higher-rate mode or disable "
+			"continuous mode.",
+			cur_sr, cm->descr, cm->max_samplerate);
+		cur_sr = cm->max_samplerate;
+		devc->cur_samplerate = cur_sr;
+	}
 	tmp_u32 = div_round_up(cm->hw_max_samplerate, cur_sr);
 	s->div_h = ((tmp_u32 >= (uint32_t)cm->pre_div) ?
 		(uint32_t)(cm->pre_div - 1U) : (tmp_u32 - 1U)) << 8;
