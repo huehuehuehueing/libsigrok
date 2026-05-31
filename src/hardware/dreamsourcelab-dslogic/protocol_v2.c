@@ -463,6 +463,43 @@ static const struct dslogic_channel_mode *v2_current_channel_mode(const struct d
 }
 
 /*
+ * Pick the channel mode that fits cur_samplerate under continuous_mode.
+ * Buffered mode trades samplerate for channel count: 16/8/4 ch at
+ * 100/200/400 MHz. Streaming mode caps at 100 MHz and trades the same
+ * way: 16/12/6/3 ch at 20/25/50/100 MHz. The smallest mode whose
+ * max_samplerate covers the requested rate wins.
+ */
+SR_PRIV uint8_t dslogic_plus_auto_pick_mode_id(uint64_t samplerate, gboolean continuous)
+{
+	size_t i, n;
+	const struct dslogic_channel_mode *modes = dslogic_plus_channel_modes(&n);
+	const struct dslogic_channel_mode *best = NULL;
+
+	for (i = 0; i < n; i++) {
+		if (modes[i].stream != continuous)
+			continue;
+		if (samplerate > modes[i].max_samplerate)
+			continue;
+		/* Prefer the mode with the highest channel count that still
+		 * supports this samplerate. */
+		if (!best || modes[i].num_channels > best->num_channels)
+			best = &modes[i];
+	}
+	if (best)
+		return best->id;
+	/* No exact fit (rate too high for any stream/buffer mode): fall
+	 * back to the mode with the highest max_samplerate in this
+	 * stream/buffer category. */
+	for (i = 0; i < n; i++) {
+		if (modes[i].stream != continuous)
+			continue;
+		if (!best || modes[i].max_samplerate > best->max_samplerate)
+			best = &modes[i];
+	}
+	return best ? best->id : DSLOGIC_PLUS_DEFAULT_CH_MODE_ID;
+}
+
+/*
  * Build the struct DSL_setting that is bulk-written to the FPGA.
  *
  * Header field encoding: (register_index << 8) | word_count
@@ -522,7 +559,8 @@ static void v2_build_default_setting(const struct sr_dev_inst *sdi,
 	 */
 	cur_sr = devc->cur_samplerate ? devc->cur_samplerate : SR_MHZ(1);
 	tmp_u32 = div_round_up(cm->hw_max_samplerate, cur_sr);
-	s->div_h = ((tmp_u32 >= cm->pre_div) ? (cm->pre_div - 1) : (tmp_u32 - 1)) << 8;
+	s->div_h = ((tmp_u32 >= (uint32_t)cm->pre_div) ?
+		(uint32_t)(cm->pre_div - 1U) : (tmp_u32 - 1U)) << 8;
 	tmp_u32 = div_round_up(tmp_u32, cm->pre_div);
 	s->div_l = tmp_u32 & 0x0000ffff;
 	s->div_h = (uint16_t)(s->div_h + (tmp_u32 >> 16));
@@ -718,6 +756,10 @@ static int v2_set_samplerate(const struct sr_dev_inst *sdi, uint64_t rate)
 {
 	struct dev_context *devc = sdi->priv;
 	devc->cur_samplerate = rate;
+	/* Auto-pick the channel mode that fits this rate under the current
+	 * stream/buffer choice. The setting struct is rebuilt at arm time,
+	 * so updating ch_mode_id here is enough. */
+	devc->ch_mode_id = dslogic_plus_auto_pick_mode_id(rate, devc->continuous_mode);
 	return SR_OK;
 }
 
