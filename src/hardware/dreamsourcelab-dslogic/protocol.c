@@ -862,9 +862,18 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 		devc->empty_transfer_count = 0;
 	}
 
-	if (!devc->limit_samples || devc->sent_samples < devc->limit_samples) {
-		if (devc->limit_samples && devc->sent_samples + cur_sample_count > devc->limit_samples)
-			num_samples = devc->limit_samples - devc->sent_samples;
+	/*
+	 * The acquisition-stop budget is actual_samples (= limit_samples for
+	 * normal captures, possibly less under RLE). Falls back to limit_samples
+	 * if the trigger-position header has not arrived yet (actual_samples
+	 * still zero from dslogic_acquisition_start).
+	 */
+	const uint64_t budget = devc->actual_samples
+		? devc->actual_samples : devc->limit_samples;
+
+	if (!budget || devc->sent_samples < budget) {
+		if (budget && devc->sent_samples + cur_sample_count > budget)
+			num_samples = budget - devc->sent_samples;
 		else
 			num_samples = cur_sample_count;
 
@@ -906,7 +915,7 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 		}
 	}
 
-	if (devc->limit_samples && devc->sent_samples >= devc->limit_samples) {
+	if (budget && devc->sent_samples >= budget) {
 		abort_acquisition(devc);
 		free_transfer(transfer);
 	} else
@@ -1059,6 +1068,24 @@ static void LIBUSB_CALL trigger_receive(struct libusb_transfer *transfer)
 		sr_info("tpos real_pos %d ram_saddr %d cnt_h %d cnt_l %d", tpos->real_pos,
 			tpos->ram_saddr, tpos->remain_cnt_h, tpos->remain_cnt_l);
 		devc->trigger_pos = tpos->real_pos;
+		{
+			/*
+			 * In RLE mode the FPGA may have captured fewer samples than
+			 * requested (compressed buffer exhausted). remain_cnt tells
+			 * us by how much. Without this adjustment the acquisition
+			 * never reaches sent_samples >= limit_samples and hangs.
+			 * Matches DSView dsl.c receive_header (around line 2463).
+			 */
+			uint64_t remain = ((uint64_t)tpos->remain_cnt_h << 32)
+				| (uint64_t)tpos->remain_cnt_l;
+			if (devc->limit_samples && remain < devc->limit_samples)
+				devc->actual_samples = devc->limit_samples - remain;
+			else
+				devc->actual_samples = devc->limit_samples;
+			if (devc->actual_samples != devc->limit_samples)
+				sr_info("RLE shortened capture: %" PRIu64 " of %" PRIu64 " samples",
+					devc->actual_samples, devc->limit_samples);
+		}
 		g_free(tpos);
 		start_transfers(sdi);
 	}
@@ -1084,6 +1111,7 @@ SR_PRIV int dslogic_acquisition_start(const struct sr_dev_inst *sdi)
 
 	devc->ctx = drvc->sr_ctx;
 	devc->sent_samples = 0;
+	devc->actual_samples = 0;
 	devc->empty_transfer_count = 0;
 	devc->acq_aborted = FALSE;
 
