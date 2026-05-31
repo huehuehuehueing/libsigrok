@@ -499,11 +499,22 @@ static const struct dslogic_channel_mode *v2_current_channel_mode(const struct d
  * letting higher sample rates fit USB 2.0 HS's ~50 MB/s ceiling.
  */
 SR_PRIV uint8_t dslogic_plus_auto_pick_mode_id(uint64_t samplerate,
-		gboolean continuous, unsigned int need_channels)
+		gboolean continuous, gboolean rle, unsigned int need_channels)
 {
 	size_t i, n;
 	const struct dslogic_channel_mode *modes = dslogic_plus_channel_modes(&n);
 	const struct dslogic_channel_mode *best = NULL;
+	/*
+	 * stream + RLE relaxes the per-mode max_samplerate cap. Each mode's
+	 * cap reflects the FPGA's RAW (uncompressed) bandwidth; with RLE
+	 * the FPGA emits compressed pairs over USB, so sparse traffic (e.g.
+	 * intermittent SPI bursts) easily fits 50 MB/s even when the raw
+	 * sample-rate × channel-count would not. Pick the smallest-channel
+	 * mode that holds need_channels and let the requested samplerate
+	 * be driven via the divider. Dense traffic can still abort with
+	 * "Device only sent N samples"; user is expected to know their bus.
+	 */
+	gboolean ignore_max_sr = continuous && rle;
 
 	if (need_channels == 0)
 		need_channels = 1;
@@ -513,7 +524,7 @@ SR_PRIV uint8_t dslogic_plus_auto_pick_mode_id(uint64_t samplerate,
 			continue;
 		if (modes[i].num_channels < need_channels)
 			continue;
-		if (samplerate > modes[i].max_samplerate)
+		if (!ignore_max_sr && samplerate > modes[i].max_samplerate)
 			continue;
 		/*
 		 * Prefer the mode with the SMALLEST num_channels that still
@@ -681,9 +692,16 @@ static void v2_build_default_setting(const struct sr_dev_inst *sdi,
 	 * channel count.
 	 */
 	devc->ch_mode_id = dslogic_plus_auto_pick_mode_id(
-		devc->cur_samplerate, devc->continuous_mode,
+		devc->cur_samplerate, devc->continuous_mode, devc->rle_mode,
 		v2_max_enabled_plus_one(sdi));
 	cm = v2_current_channel_mode(devc);
+	sr_dbg("Arm: picked mode id=%u (%s); cur_samplerate=%" PRIu64
+	       " Hz, continuous=%s, rle=%s, need_ch=%u",
+	       (unsigned)devc->ch_mode_id, cm->descr,
+	       devc->cur_samplerate,
+	       devc->continuous_mode ? "on" : "off",
+	       devc->rle_mode ? "on" : "off",
+	       v2_max_enabled_plus_one(sdi));
 
 	memset(s, 0, sizeof(*s));
 
@@ -743,13 +761,30 @@ static void v2_build_default_setting(const struct sr_dev_inst *sdi,
 	 * continuous mode.
 	 */
 	if (cur_sr > cm->max_samplerate) {
-		sr_warn("Requested samplerate %" PRIu64 " Hz exceeds "
-			"%s's max of %" PRIu64 " Hz; clamping. "
-			"Drop a channel for a higher-rate mode or disable "
-			"continuous mode.",
-			cur_sr, cm->descr, cm->max_samplerate);
-		cur_sr = cm->max_samplerate;
-		devc->cur_samplerate = cur_sr;
+		if (devc->rle_mode && devc->continuous_mode) {
+			/*
+			 * Stream+RLE: the FPGA emits RLE-compressed pairs over
+			 * USB, so the raw-bandwidth ceiling that defines
+			 * max_samplerate doesn't apply directly. Run at the
+			 * requested rate; dense traffic may still abort the
+			 * capture early ("Device only sent N samples") if
+			 * compressed throughput exceeds USB 2.0 HS's ceiling.
+			 */
+			sr_info("Stream+RLE: running at %" PRIu64 " Hz on %s "
+				"(raw max %" PRIu64 " Hz). USB throughput is "
+				"bounded by signal density via RLE; dense "
+				"traffic can abort early.",
+				cur_sr, cm->descr, cm->max_samplerate);
+		} else {
+			sr_warn("Requested samplerate %" PRIu64 " Hz exceeds "
+				"%s's max of %" PRIu64 " Hz; clamping. "
+				"Drop a channel for a higher-rate mode, "
+				"enable RLE for compressed streaming, or "
+				"disable continuous mode.",
+				cur_sr, cm->descr, cm->max_samplerate);
+			cur_sr = cm->max_samplerate;
+			devc->cur_samplerate = cur_sr;
+		}
 	}
 	tmp_u32 = div_round_up(cm->hw_max_samplerate, cur_sr);
 	s->div_h = ((tmp_u32 >= (uint32_t)cm->pre_div) ?
@@ -987,7 +1022,8 @@ static int v2_set_samplerate(const struct sr_dev_inst *sdi, uint64_t rate)
 	/* Auto-pick the channel mode that fits this rate + enabled-channel
 	 * count under the current stream/buffer choice. */
 	devc->ch_mode_id = dslogic_plus_auto_pick_mode_id(rate,
-		devc->continuous_mode, v2_max_enabled_plus_one(sdi));
+		devc->continuous_mode, devc->rle_mode,
+		v2_max_enabled_plus_one(sdi));
 	return SR_OK;
 }
 

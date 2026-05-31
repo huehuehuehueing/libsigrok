@@ -565,7 +565,7 @@ static int config_set(uint32_t key, GVariant *data,
 				if (m & (1U << i)) hi = i + 1;
 			devc->ch_mode_id = dslogic_plus_auto_pick_mode_id(
 				devc->cur_samplerate, devc->continuous_mode,
-				hi ? hi : 1);
+				devc->rle_mode, hi ? hi : 1);
 		}
 		break;
 	case SR_CONF_CLOCK_EDGE:
