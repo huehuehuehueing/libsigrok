@@ -542,12 +542,26 @@ static void v2_build_default_setting(const struct sr_dev_inst *sdi,
 	s->trig_header      = 0x40a0;   /* reg 0x40, 0xa0 words */
 
 	/*
-	 * mode = logic capture, no trigger; stream bit set in stream channel
-	 * modes (mirrors DSView's STREAM_MODE_BIT in dsl.c).
+	 * mode bitfield. Mirrors DSView dsl.c (LOGIC mode branch):
+	 *   bit 1  CLK_TYPE   - external clock if set
+	 *   bit 2  CLK_EDGE   - falling edge if set
+	 *   bit 3  RLE_MODE   - run-length encoding
+	 *   bit 8  FILTER     - 1T glitch filter
+	 *   bit 12 STREAM_MODE - streaming vs buffered
+	 * The DSLogic Plus has no DSO/ANALOG/HALF/QUAR modes so those bits
+	 * stay zero. Trigger bits stay zero until trigger support lands.
 	 */
 	s->mode = 0;
 	if (cm->stream)
 		s->mode |= (1 << DS_MODE_STREAM_MODE_BIT);
+	if (devc->external_clock)
+		s->mode |= (1 << DS_MODE_CLK_TYPE_BIT);
+	if (devc->clock_edge == DS_EDGE_FALLING)
+		s->mode |= (1 << DS_MODE_CLK_EDGE_BIT);
+	if (devc->rle_mode)
+		s->mode |= (1 << DS_MODE_RLE_MODE_BIT);
+	if (devc->filter)
+		s->mode |= (1 << DS_MODE_FILTER_BIT);
 
 	/*
 	 * Samplerate divider (dsl.c, LOGIC mode branch).

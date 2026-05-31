@@ -76,6 +76,8 @@ static const uint32_t devopts[] = {
 	SR_CONF_CAPTURE_RATIO | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_EXTERNAL_CLOCK | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_CLOCK_EDGE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_RLE | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_FILTER | SR_CONF_GET | SR_CONF_SET,
 };
 
 static const int32_t trigger_matches[] = {
@@ -470,6 +472,12 @@ static int config_get(uint32_t key, GVariant **data,
 	case SR_CONF_EXTERNAL_CLOCK:
 		*data = g_variant_new_boolean(devc->external_clock);
 		break;
+	case SR_CONF_RLE:
+		*data = g_variant_new_boolean(devc->rle_mode);
+		break;
+	case SR_CONF_FILTER:
+		*data = g_variant_new_string(devc->filter ? "1T" : "None");
+		break;
 	case SR_CONF_CONTINUOUS:
 		*data = g_variant_new_boolean(devc->continuous_mode);
 		break;
@@ -526,6 +534,16 @@ static int config_set(uint32_t key, GVariant *data,
 	case SR_CONF_EXTERNAL_CLOCK:
 		devc->external_clock = g_variant_get_boolean(data);
 		break;
+	case SR_CONF_RLE:
+		devc->rle_mode = g_variant_get_boolean(data);
+		break;
+	case SR_CONF_FILTER: {
+		const char *s = g_variant_get_string(data, NULL);
+		devc->filter = s && (g_ascii_strcasecmp(s, "1T") == 0
+			|| g_ascii_strcasecmp(s, "on") == 0
+			|| g_ascii_strcasecmp(s, "true") == 0);
+		break;
+	}
 	case SR_CONF_CONTINUOUS:
 		devc->continuous_mode = g_variant_get_boolean(data);
 		if (devc->profile->protocol_version == DSL_PROTO_V2) {
