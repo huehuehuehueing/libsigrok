@@ -555,6 +555,114 @@ SR_PRIV uint8_t dslogic_plus_auto_pick_mode_id(uint64_t samplerate,
 /* Forward decl: defined later, used in v2_build_default_setting. */
 static unsigned int v2_max_enabled_plus_one(const struct sr_dev_inst *sdi);
 
+/*
+ * Encode the libsigrok session trigger (if any) into the DSL_setting
+ * trig_* fields and return the number of trigger stages (0 = no trigger).
+ *
+ * Field semantics (mirrors DSView trigger.c bit packing):
+ *   trig_mask  bit i = 1 -> "don't care" or edge-trigger on channel i
+ *   trig_value bit i   = expected level when mask bit is 0
+ *   trig_edge  bit i = 1 -> require edge transition on channel i
+ *   trig_logic   = (stage_logic << 1) + invert    [stage active]
+ *                = 2 ("always true")             [unused stages]
+ *
+ * SR match types map per channel as:
+ *   ZERO    -> mask=0,  value=0, edge=0
+ *   ONE     -> mask=0,  value=1, edge=0
+ *   FALLING -> mask=0,  value=0, edge=1
+ *   RISING  -> mask=0,  value=1, edge=1
+ *   EDGE    -> mask=1,  value=0, edge=1   (either edge)
+ *
+ * Mirroring trig_mask0/value0/edge0 to trig_mask1/value1/edge1 means
+ * the same condition must hold for both halves of the FPGA's
+ * comparator network; that's what DSView SIMPLE_TRIGGER does.
+ */
+static int v2_encode_trigger(const struct sr_dev_inst *sdi,
+			     struct DSL_setting *s)
+{
+	struct sr_trigger *trigger;
+	struct sr_trigger_stage *stage;
+	struct sr_trigger_match *match;
+	const GSList *l, *m;
+	int num_stages = 0;
+	int i;
+
+	for (i = 0; i < NUM_TRIGGER_STAGES; i++) {
+		s->trig_mask0[i]  = 0xffff;
+		s->trig_mask1[i]  = 0xffff;
+		s->trig_value0[i] = 0;
+		s->trig_value1[i] = 0;
+		s->trig_edge0[i]  = 0;
+		s->trig_edge1[i]  = 0;
+		s->trig_logic0[i] = 2;
+		s->trig_logic1[i] = 2;
+		s->trig_count[i]  = 0;
+	}
+
+	if (!(trigger = sr_session_trigger_get(sdi->session)))
+		return 0;
+
+	for (l = trigger->stages; l; l = l->next) {
+		stage = l->data;
+		num_stages++;
+		for (m = stage->matches; m; m = m->next) {
+			uint16_t bit;
+			match = m->data;
+			if (!match->channel->enabled)
+				continue;
+			if (match->channel->index >= 16)
+				continue;
+			bit = (uint16_t)(1U << match->channel->index);
+			switch (match->match) {
+			case SR_TRIGGER_ONE:
+				s->trig_mask0[0]  = (uint16_t)(s->trig_mask0[0]  & ~bit);
+				s->trig_mask1[0]  = (uint16_t)(s->trig_mask1[0]  & ~bit);
+				s->trig_value0[0] = (uint16_t)(s->trig_value0[0] |  bit);
+				s->trig_value1[0] = (uint16_t)(s->trig_value1[0] |  bit);
+				break;
+			case SR_TRIGGER_ZERO:
+				s->trig_mask0[0]  = (uint16_t)(s->trig_mask0[0]  & ~bit);
+				s->trig_mask1[0]  = (uint16_t)(s->trig_mask1[0]  & ~bit);
+				break;
+			case SR_TRIGGER_FALLING:
+				s->trig_mask0[0]  = (uint16_t)(s->trig_mask0[0]  & ~bit);
+				s->trig_mask1[0]  = (uint16_t)(s->trig_mask1[0]  & ~bit);
+				s->trig_edge0[0]  = (uint16_t)(s->trig_edge0[0]  |  bit);
+				s->trig_edge1[0]  = (uint16_t)(s->trig_edge1[0]  |  bit);
+				break;
+			case SR_TRIGGER_RISING:
+				s->trig_mask0[0]  = (uint16_t)(s->trig_mask0[0]  & ~bit);
+				s->trig_mask1[0]  = (uint16_t)(s->trig_mask1[0]  & ~bit);
+				s->trig_value0[0] = (uint16_t)(s->trig_value0[0] |  bit);
+				s->trig_value1[0] = (uint16_t)(s->trig_value1[0] |  bit);
+				s->trig_edge0[0]  = (uint16_t)(s->trig_edge0[0]  |  bit);
+				s->trig_edge1[0]  = (uint16_t)(s->trig_edge1[0]  |  bit);
+				break;
+			case SR_TRIGGER_EDGE:
+				s->trig_edge0[0]  = (uint16_t)(s->trig_edge0[0]  |  bit);
+				s->trig_edge1[0]  = (uint16_t)(s->trig_edge1[0]  |  bit);
+				break;
+			default:
+				break;
+			}
+		}
+	}
+
+	if (num_stages > 0) {
+		/* Active stage uses AND-of-conditions, non-inverted. */
+		s->trig_logic0[0] = 0;
+		s->trig_logic1[0] = 0;
+		/*
+		 * Enable the FPGA's trigger comparator. Without this bit the
+		 * trig_* fields are ignored and the capture starts immediately
+		 * on arm. (DSView dsl.c:1060 packs trigger_en into this bit.)
+		 */
+		s->mode |= (uint16_t)(1U << DS_MODE_TRIG_EN_BIT);
+	}
+
+	return num_stages;
+}
+
 static void v2_build_default_setting(const struct sr_dev_inst *sdi,
 				     struct DSL_setting *s)
 {
@@ -564,7 +672,6 @@ static void v2_build_default_setting(const struct sr_dev_inst *sdi,
 	uint64_t cur_sr;
 	uint64_t count_units;
 	uint32_t ch_en_mask;
-	int i;
 
 	/*
 	 * Re-pick the channel mode here so it sees the FINAL enabled-channel
@@ -659,12 +766,27 @@ static void v2_build_default_setting(const struct sr_dev_inst *sdi,
 	s->cnt_l = count_units & 0xffff;
 	s->cnt_h = (count_units >> 16) & 0xffff;
 
-	/* trig_pos = 0 (no pre-trigger). */
-	s->tpos_l = 0;
-	s->tpos_h = 0;
-
-	/* trig_glb = 0 (no trigger). */
-	s->trig_glb = 0;
+	/*
+	 * Trigger position. capture_ratio is a percentage of limit_samples
+	 * that should sit BEFORE the trigger fires (pre-trigger memory).
+	 * The FPGA buffer is divided in 64-sample atomic blocks; align to
+	 * that. Clamp to 10% in streaming mode (DSView dsl.c:1101-1104)
+	 * and 90% in buffered mode (DSL_MAX_TRIG_PERCENT, dsl.c:1104).
+	 */
+	{
+		uint32_t mem_depth = (uint32_t)devc->profile->mem_depth;
+		uint32_t tpos = (uint32_t)((devc->capture_ratio *
+				devc->limit_samples) / 100U);
+		uint32_t cap = devc->continuous_mode ? (mem_depth * 10U / 100U)
+						     : (mem_depth * 90U / 100U);
+		if (tpos < 64U)
+			tpos = 64U;
+		if (tpos > cap)
+			tpos = cap;
+		tpos &= ~63U;   /* align down to 64-sample boundary */
+		s->tpos_l = (uint16_t)(tpos & 0xffff);
+		s->tpos_h = (uint16_t)(tpos >> 16);
+	}
 
 	/* dso_cnt = 0 (unused in logic mode). */
 	s->dso_cnt_l = 0;
@@ -695,22 +817,19 @@ static void v2_build_default_setting(const struct sr_dev_inst *sdi,
 	s->fgain = 0;
 
 	/*
-	 * Trigger arrays - "no trigger" defaults, mirroring dsl.c
-	 * (the i >= 1 loop in the SIMPLE_TRIGGER branch; we apply it to all
-	 * stages since we have no active trigger stage).
-	 *
-	 * memset already zeroed value/edge/count; set mask and logic explicitly.
+	 * Trigger encoding. Reads sr_session_trigger_get() and packs
+	 * channel-level conditions into stage 0; remaining stages are
+	 * filled with "always true" defaults. trig_glb mirrors DSView
+	 * dsl.c:1109 - upper 5 bits are enabled-channel count, low byte
+	 * is the encoded stage count (0 = SIMPLE_TRIGGER single stage).
 	 */
-	for (i = 0; i < NUM_TRIGGER_STAGES; i++) {
-		s->trig_mask0[i]  = 0xffff;
-		s->trig_mask1[i]  = 0xffff;
-		s->trig_value0[i] = 0;
-		s->trig_value1[i] = 0;
-		s->trig_edge0[i]  = 0;
-		s->trig_edge1[i]  = 0;
-		s->trig_logic0[i] = 2;   /* "always" per DSView */
-		s->trig_logic1[i] = 2;
-		s->trig_count[i]  = 0;
+	{
+		int num_stages = v2_encode_trigger(sdi, s);
+		unsigned int ch_num = enabled_channel_count(sdi);
+		unsigned int stage_field =
+			(num_stages > 0) ? (unsigned int)(num_stages - 1) : 0U;
+		s->trig_glb = (uint16_t)(((ch_num & 0x1fU) << 8) |
+					 (stage_field & 0xffU));
 	}
 }
 
