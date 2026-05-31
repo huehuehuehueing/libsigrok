@@ -1070,21 +1070,33 @@ static void LIBUSB_CALL trigger_receive(struct libusb_transfer *transfer)
 		devc->trigger_pos = tpos->real_pos;
 		{
 			/*
-			 * In RLE mode the FPGA may have captured fewer samples than
-			 * requested (compressed buffer exhausted). remain_cnt tells
-			 * us by how much. Without this adjustment the acquisition
-			 * never reaches sent_samples >= limit_samples and hangs.
-			 * Matches DSView dsl.c receive_header (around line 2463).
+			 * In buffered (one-shot) mode with RLE the FPGA may have
+			 * captured fewer samples than requested (compressed buffer
+			 * exhausted). remain_cnt tells us by how much. Without this
+			 * adjustment the acquisition never reaches sent_samples >=
+			 * limit_samples and hangs. Matches DSView dsl.c
+			 * receive_header.
+			 *
+			 * In streaming (continuous) mode remain_cnt is an in-flight
+			 * "samples-remaining-to-send" counter that updates as the
+			 * FPGA streams; subtracting it from limit_samples gives a
+			 * meaningless tiny number that would stop the acquisition
+			 * almost immediately. Skip the shortening entirely for
+			 * streaming and let limit_samples be the stop budget.
 			 */
-			uint64_t remain = ((uint64_t)tpos->remain_cnt_h << 32)
-				| (uint64_t)tpos->remain_cnt_l;
-			if (devc->limit_samples && remain < devc->limit_samples)
-				devc->actual_samples = devc->limit_samples - remain;
-			else
+			if (!devc->continuous_mode) {
+				uint64_t remain = ((uint64_t)tpos->remain_cnt_h << 32)
+					| (uint64_t)tpos->remain_cnt_l;
+				if (devc->limit_samples && remain < devc->limit_samples)
+					devc->actual_samples = devc->limit_samples - remain;
+				else
+					devc->actual_samples = devc->limit_samples;
+				if (devc->actual_samples != devc->limit_samples)
+					sr_info("RLE shortened capture: %" PRIu64 " of %" PRIu64 " samples",
+						devc->actual_samples, devc->limit_samples);
+			} else {
 				devc->actual_samples = devc->limit_samples;
-			if (devc->actual_samples != devc->limit_samples)
-				sr_info("RLE shortened capture: %" PRIu64 " of %" PRIu64 " samples",
-					devc->actual_samples, devc->limit_samples);
+			}
 		}
 		g_free(tpos);
 		start_transfers(sdi);
