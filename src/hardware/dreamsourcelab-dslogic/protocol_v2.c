@@ -795,9 +795,15 @@ static void v2_build_default_setting(const struct sr_dev_inst *sdi,
 
 	/*
 	 * Capture counter (dsl.c, LOGIC mode branch).
-	 * The FPGA's minimum unit is 16 samples (>>4).
+	 * The FPGA's minimum unit is 16 samples (>>4). When chunk_loop is
+	 * active, count per-chunk samples instead of the whole session, so
+	 * the FPGA stops at each chunk boundary and the driver re-arms.
 	 */
-	count_units = devc->limit_samples >> 4;
+	{
+		uint64_t per_chunk = (devc->chunk_loop && devc->chunk_samples)
+			? devc->chunk_samples : devc->limit_samples;
+		count_units = per_chunk >> 4;
+	}
 	s->cnt_l = count_units & 0xffff;
 	s->cnt_h = (count_units >> 16) & 0xffff;
 
