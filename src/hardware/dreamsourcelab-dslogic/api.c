@@ -21,6 +21,7 @@
 #include <config.h>
 #include <math.h>
 #include "protocol.h"
+#include "protocol_v2.h"
 
 static const struct dslogic_profile supported_device[] = {
 	/* DreamSourceLab DSLogic */
@@ -540,6 +541,12 @@ static int config_set(uint32_t key, GVariant *data,
 		break;
 	case SR_CONF_CONTINUOUS:
 		devc->continuous_mode = g_variant_get_boolean(data);
+		if (devc->profile->protocol_version == DSL_PROTO_V2) {
+			/* Re-pick the channel mode for the new stream/buffer
+			 * choice; uses the current samplerate as the hint. */
+			devc->ch_mode_id = dslogic_plus_auto_pick_mode_id(
+				devc->cur_samplerate, devc->continuous_mode);
+		}
 		break;
 	case SR_CONF_CLOCK_EDGE:
 		if ((idx = std_str_idx(data, ARRAY_AND_SIZE(signal_edges))) < 0)
