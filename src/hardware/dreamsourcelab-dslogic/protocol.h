@@ -149,6 +149,14 @@ struct dev_context {
 
 	uint64_t cur_samplerate;
 	uint64_t limit_samples;
+	/*
+	 * Number of samples the FPGA actually captured. Equals limit_samples
+	 * for normal captures; less when RLE is enabled and the FPGA's
+	 * compressed buffer ran out before reaching limit_samples (the
+	 * trigger-header packet's remain_cnt fields tell us by how much).
+	 * Set in trigger_receive; used by the acquisition stop check.
+	 */
+	uint64_t actual_samples;
 	uint64_t capture_ratio;
 
 	gboolean acq_aborted;
