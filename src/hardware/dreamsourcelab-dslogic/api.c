@@ -76,6 +76,8 @@ static const uint32_t devopts[] = {
 	SR_CONF_CAPTURE_RATIO | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_EXTERNAL_CLOCK | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_CLOCK_EDGE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_RLE | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_FILTER | SR_CONF_GET | SR_CONF_SET,
 };
 
 static const int32_t trigger_matches[] = {
@@ -483,6 +485,12 @@ static int config_get(uint32_t key, GVariant **data,
 	case SR_CONF_EXTERNAL_CLOCK:
 		*data = g_variant_new_boolean(devc->external_clock);
 		break;
+	case SR_CONF_RLE:
+		*data = g_variant_new_boolean(devc->rle_mode);
+		break;
+	case SR_CONF_FILTER:
+		*data = g_variant_new_boolean(devc->filter);
+		break;
 	case SR_CONF_CONTINUOUS:
 		*data = g_variant_new_boolean(devc->continuous_mode);
 		break;
@@ -538,6 +546,12 @@ static int config_set(uint32_t key, GVariant *data,
 		break;
 	case SR_CONF_EXTERNAL_CLOCK:
 		devc->external_clock = g_variant_get_boolean(data);
+		break;
+	case SR_CONF_RLE:
+		devc->rle_mode = g_variant_get_boolean(data);
+		break;
+	case SR_CONF_FILTER:
+		devc->filter = g_variant_get_boolean(data);
 		break;
 	case SR_CONF_CONTINUOUS:
 		devc->continuous_mode = g_variant_get_boolean(data);

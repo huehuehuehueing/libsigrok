@@ -166,6 +166,9 @@ struct dev_context {
 	uint16_t mode;
 	uint32_t trigger_pos;
 	gboolean external_clock;
+	/* V2 only: RLE compression + glitch filter toggles (DSLogic Plus). */
+	gboolean rle_mode;
+	gboolean filter;
 	gboolean continuous_mode;
 	int clock_edge;
 	double cur_threshold;
